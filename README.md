@@ -226,35 +226,275 @@ curl -X POST http://localhost:8000/api/v1/products \
 | user | View products, manage own profile |
 | admin | All user permissions + manage products, manage all users |
 
-## CI/CD Pipeline (Explanation)
+## Optional Sections - Implementation Approach
 
-For production deployment, implement:
+### 1. AI Integration (If Implemented)
 
-### 1. Automated Tests Pipeline
-```yaml
-# .github/workflows/test.yml
-- Run linting (flake8, black, isort)
-- Run type checking (mypy)
-- Run unit tests with coverage
-- Upload coverage report
+The following approach would be taken to integrate AI capabilities:
+
+#### A. AI-Powered Product Recommendations
+
+**Architecture:**
+```
+User Request → API Gateway → Recommendation Service → ML Model → Cache → Response
 ```
 
-### 2. Docker Image Publishing
-```yaml
-# .github/workflows/build.yml
-- Build Docker image
-- Tag with version/sha
-- Push to Docker Hub/ECR
+**Implementation Steps:**
+1. **Create AI Service Module** (`app/services/ai_service.py`):
+   - Integrate with OpenAI API or similar LLM provider
+   - Implement product recommendation based on user browsing history
+   - Add semantic search using embeddings for natural language product queries
+
+2. **Add AI Endpoints** (`app/api/endpoints/ai.py`):
+   ```python
+   @router.post("/recommendations")
+   async def get_recommendations(user_id: str, limit: int = 5):
+       # Get user purchase/view history
+       # Call AI service for recommendations
+       # Cache results for performance
+       pass
+   
+   @router.post("/search/smart")
+   async def smart_search(query: str):
+       # Use embeddings for semantic search
+       # Return relevant products beyond keyword matching
+       pass
+   ```
+
+3. **Environment Configuration**:
+   ```env
+   OPENAI_API_KEY=sk-xxx
+   AI_MODEL=gpt-4
+   EMBEDDING_MODEL=text-embedding-ada-002
+   ```
+
+4. **Caching Strategy**:
+   - Cache embeddings for products (updated on product changes)
+   - Cache recommendation results per user (TTL: 1 hour)
+
+#### B. AI-Powered Product Description Generation
+
+```python
+@router.post("/products/{product_id}/generate-description")
+async def generate_description(product_id: str):
+    """Generate SEO-optimized product description using AI"""
+    product = await ProductService.get_by_id(product_id)
+    prompt = f"Write a compelling product description for: {product.name}"
+    description = await ai_service.generate_content(prompt)
+    return {"description": description}
 ```
 
-### 3. Deployment Workflow
+---
+
+### 2. CI/CD Pipeline (If Implemented)
+
+A comprehensive CI/CD pipeline using GitHub Actions would be implemented as follows:
+
+#### A. Test Workflow (`.github/workflows/test.yml`)
+
 ```yaml
-# .github/workflows/deploy.yml
-- Deploy to staging on develop branch
-- Deploy to production on main branch
-- Run database migrations
-- Health check after deployment
+name: Test
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: test_db
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install flake8 black isort mypy
+      
+      - name: Run linting
+        run: |
+          flake8 app tests --max-line-length=100
+          black --check app tests
+          isort --check-only app tests
+      
+      - name: Run type checking
+        run: mypy app --ignore-missing-imports
+      
+      - name: Run tests with coverage
+        env:
+          DATABASE_URL: postgresql+asyncpg://test:test@localhost:5432/test_db
+          REDIS_URL: redis://localhost:6379/0
+          SECRET_KEY: test-secret-key-for-ci-pipeline
+        run: |
+          pytest --cov=app --cov-report=xml --cov-report=html
+      
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        with:
+          file: ./coverage.xml
 ```
+
+#### B. Build & Push Docker Image (`.github/workflows/build.yml`)
+
+```yaml
+name: Build & Push
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+      
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ secrets.DOCKER_USERNAME }}/fastapi-assessment
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=sha
+      
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+```
+
+#### C. Deployment Workflow (`.github/workflows/deploy.yml`)
+
+```yaml
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: fastapi-assessment
+  ECS_SERVICE: fastapi-service
+  ECS_CLUSTER: production
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+      
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+      
+      - name: Build, tag, and push image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+      
+      - name: Deploy to ECS
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition: task-definition.json
+          service: ${{ env.ECS_SERVICE }}
+          cluster: ${{ env.ECS_CLUSTER }}
+          wait-for-service-stability: true
+      
+      - name: Run database migrations
+        run: |
+          # Connect to ECS task and run migrations
+          aws ecs run-task --cluster $ECS_CLUSTER --task-definition migration-task
+      
+      - name: Health check
+        run: |
+          curl -f https://api.example.com/health || exit 1
+```
+
+#### D. Pipeline Summary
+
+| Stage | Trigger | Actions |
+|-------|---------|---------|
+| **Test** | Push/PR to main/develop | Lint, type-check, test, coverage |
+| **Build** | Push to main, tags | Build Docker image, push to registry |
+| **Deploy** | Push to main | Deploy to ECS, run migrations, health check |
+
+#### E. Required GitHub Secrets
+
+```
+DOCKER_USERNAME          - Docker Hub username
+DOCKER_PASSWORD          - Docker Hub password/token
+AWS_ACCESS_KEY_ID        - AWS access key
+AWS_SECRET_ACCESS_KEY    - AWS secret key
+SECRET_KEY               - Production app secret
+DATABASE_URL             - Production database URL
+REDIS_URL                - Production Redis URL
+```
+
+---
 
 ## License
 
